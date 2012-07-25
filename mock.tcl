@@ -2,91 +2,96 @@
 # the next line ignored by Tcl \
 exec tclsh "$0" "$@"
 
-# ===== REQUEST HEADERS =====
+package require logger
 
-set request_header {
-    c magic
-    c opcode
-    S keylen
-    c extlen
-    c datatype
-    S vbucket
-    I bodylen
-    I opaque
-    W cas
+source [file join [file dirname [info script]] protocol.tcl]
+
+proc showstate {} {
+    upvar 1 state state
+    set ret {}
+    dict for {key value} $state {
+        lappend ret "$key = $value"
+    }
+    return [join $ret "\n"]
 }
 
-set request_get $request_header
-set request_getq $request_header
-set request_getk $request_header
-set request_getkq $request_header
-set request_gat [concat $request_header {
-    I expiration
-}]
-set request_gatq $request_gat
-set request_touch $request_gat
-set request_delete $request_header
-set request_flush [concat $request_header {
-    I expiration
-}]
-set request_set [concat $request_header {
-    I flags
-    I expiration
-}]
-set request_add $request_set
-set request_replace $request_set
-set request_noop $request_header
-set request_incr [concat $request_header {
-    W delta
-    W initial
-    I expiration
-}]
-set request_decr $request_incr
-set request_quit $request_header
-set request_append $request_header
-set request_prepend $request_header
-set request_version $request_header
-set request_stats $request_header
-set request_verbosity [concat $request_header {
-    I level
-}]
+namespace eval mock {
+    variable log
+    set log [logger::init mock]
+    namespace export {init}
+    variable serversocket
 
-# ===== RESPONSE HEADERS =====
+    proc closeSocket {socket} {
+        variable log
+        variable $socket
+        upvar 0 $socket state
+        ${log}::notice "closing $socket"
+        catch {close $socket}
+        unset state
+    }
 
-set response_header {
-    c magic
-    c opcode
-    S keylen
-    c extlen
-    c datatype
-    S status
-    I bodylen
-    I opaque
-    W cas
+    # This gets called whenever a client sends a new line
+    # of data or disconnects
+    proc handler {socket} {
+        variable log
+        variable $socket
+        upvar 0 $socket state
+
+        # Do we have a disconnect?
+        if {[eof $socket]} {
+            closeSocket $socket
+            return
+        }
+        # Does reading the socket give us an error?
+        if {[catch {gets $socket line} ret] == -1} {
+            closeSocket $socket
+            return
+        }
+        # Did we really get a whole line?
+        if {$ret == -1} return
+        # ... and is it not empty? ...
+        set line [string trim $line]
+        if {$line == ""} return
+        ${log}::notice "$socket > $line"
+        if {[catch {slave eval $line} ret]} {
+            ${log}::warn "$ret: {$line}"
+            set ret "ERROR: $ret"
+        } else {
+            ${log}::notice [regsub -all -line ^ $ret "$socket < "]
+        }
+        if {[catch {puts $socket $ret}]} {
+            closeSocket $socket
+        }
+    }
+
+    # This gets called whenever a client connects
+    proc server {socket host port} {
+        variable log
+        variable $socket
+        upvar 0 $socket state
+        # just to be sure ...
+        if {[info exist state]} {
+            unset state
+        }
+        set state [dict create]
+        dict set state socket $socket
+        dict set state host $host
+        dict set state port $port
+        ${log}::notice "new connection: $socket $host $port"
+        fconfigure $socket -buffering line -blocking 0
+        fileevent $socket readable [list [namespace code handler] $socket]
+    }
+
+    # Initialize server sockets
+    proc init {} {
+        variable log
+        interp create -safe slave
+        set commands {showstate}
+        foreach command $commands {
+            interp alias slave $command {} $command
+        }
+        ${log}::notice "supported commands: [join $commands ,]"
+        ::socket -server [namespace code server] 4242
+        ${log}::notice "listening at 4242"
+    }
 }
-
-set response_get [concat $response_header {
-    I flags
-}]
-set response_getq $response_get
-set response_getk $response_get
-set response_getkq $response_get
-set response_gat $response_get
-set response_gatq $response_get
-set response_touch $response_header
-set response_delete $response_header
-set response_flush $response_header
-set response_set $response_header
-set response_add $response_header
-set response_replace $response_header
-set response_noop $response_header
-set response_incr [concat $response_header {
-    W value
-}]
-set response_decr $response_incr
-set response_quit $response_header
-set response_append $response_header
-set response_prepend $response_header
-set response_version $response_header
-set response_stats $response_header
-set response_verbosity $response_header
